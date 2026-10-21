@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: american-roulette-six-player
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health

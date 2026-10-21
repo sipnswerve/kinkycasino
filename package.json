@@ -1,0 +1,9 @@
+{
+  "name": "american-roulette-six-player",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Six-player shared-wheel American roulette simulator (play credits only)",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js", "test": "node --test test/*.test.js" },
+  "license": "UNLICENSED"
+}
