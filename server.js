@@ -1,5 +1,5 @@
 'use strict';
-// Rory's Roulette multiplayer demo. Play credits only: no payments, prizes, or real money.
+// Rory's Kinky Casino multiplayer demo. Play credits only: no payments, prizes, or real money.
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -14,7 +14,7 @@ const MAX_ROOMS = 150, MAX_BETS = 500, MAX_PLAYERS = 6;
 const ALL = Array.from({length:36}, (_,i)=>String(i+1));
 const RED = new Set([1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36].map(String));
 const WHEEL = ['0',28,9,26,30,11,7,20,32,17,5,22,34,15,3,24,36,13,1,'00',27,10,25,29,12,8,19,31,18,6,21,33,16,4,23,35,14,2].map(String);
-const CHIP_VALUES = new Set([1,5,10,25,100]);
+const CHIP_VALUES = new Set([1,5,10,25,100,500]);
 const PAYOUTS = {straight:35,split:17,street:11,corner:8,sixline:5};
 const OUTSIDE = Object.create(null);
 function define(id,label,nums,payout) { OUTSIDE[id] = {type:id,label,numbers:nums.map(String),payout}; }
@@ -39,6 +39,7 @@ function wheelDistance(previous,latest) {
   return {from:WHEEL[before],to:WHEEL[after],side:same?'same':'opposite',
     offset:same?(steps<=9?steps:steps-38):steps-19};
 }
+const DEFAULT_CODE='CASINO7';
 const rooms = new Map();
 
 function cleanName(input) {
@@ -55,10 +56,19 @@ function publicPlayer(player,room) { return {id:player.id,seat:player.seat,name:
 function exposureFor(bets) { const result=Object.fromEntries(WHEEL.map(n=>[n,0])); for(const bet of bets) for(const n of bet.numbers) result[n]+=bet.stake; return result; }
 function snapshot(room,player) {
   const otherBets=room.players.filter(p=>p!==player).flatMap(p=>p.bets);
+  // Share aggregate public betting positions but never anyone else's private seat token.
+  const aggregate=new Map();
+  for(const p of room.players.filter(p=>p!==player))for(const bet of p.bets){
+    const key=p.seat+'|'+bet.type+'|'+bet.numbers.join(',');
+    let item=aggregate.get(key);
+    if(!item){item={seat:p.seat,name:p.name,type:bet.type,numbers:bet.numbers,stake:0,count:0};aggregate.set(key,item);}
+    item.stake+=bet.stake;item.count++;
+  }
   return { code:room.code,initialBankroll:room.initialBankroll,hostId:room.hostId,
     you:publicPlayer(player,room),players:room.players.map(p=>publicPlayer(p,room)),
     bets:player.bets, lastBets:player.lastBets,
     mineExposure:exposureFor(player.bets),otherExposure:exposureFor(otherBets),
+    otherBoardBets:[...aggregate.values()],
     history:room.history.slice(-25),lastResult:room.lastResult,
     // Keep the 26th oldest outcome only for the first distance in the 25-spin window.
     distanceHistory:room.history.map((to,i)=>i>0
@@ -108,6 +118,10 @@ function createRoom(name,amount) {
   scheduleRound(room);
   return {room,player};
 }
+// One shared default table per server process. Every visitor enters this table.
+const defaultRoom={code:DEFAULT_CODE,initialBankroll:1000,hostId:null,players:[],history:[],historyPrevious:null,lastResult:null,
+  spin:null,round:0,totalSpins:0,updatedAt:Date.now(),lastHumanActivityAt:Date.now(),nextBet:0,nextSpinAt:null,roundTimer:null};
+rooms.set(DEFAULT_CODE,defaultRoom);
 function addPlayer(room,name) {
   const seat=Array.from({length:MAX_PLAYERS},(_,i)=>i+1).find(s=>!room.players.some(p=>p.seat===s));
   const player={id:crypto.randomUUID(),token:crypto.randomBytes(24).toString('hex'),name:cleanName(name),seat,bankroll:room.initialBankroll,pl:0,bets:[],ready:false,lastBets:[],lastSettlement:null,streams:new Set()};
@@ -237,29 +251,22 @@ async function bodyJson(req) {
   for await(const chunk of req) {count+=chunk.length;if(count>16384)fail('Request is too large.',413);parts.push(chunk);}
   try {return JSON.parse(Buffer.concat(parts).toString('utf8'));} catch {fail('Invalid JSON request.');}
 }
-function getRoom(code) {const room=rooms.get(validCode(code));if(!room)fail('Table not found. The server may have restarted; create a new table.',404);return room;}
+function getRoom(code) {const room=rooms.get(DEFAULT_CODE);if(!room)fail('The table is temporarily unavailable.',503);return room;}
 function getUser(room,token) {const player=membership(room,token);if(!player)fail('Your seat has expired. Rejoin with your name to take an available seat.',401);return player;}
 const server=http.createServer(async(req,res)=>{
   try {
     const url=new URL(req.url,'http://localhost');
-    if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,version:'4.0.0',wheel:'correct-dozens-columns-v4-20261022'});
-    if(req.method==='POST'&&url.pathname==='/api/create'){
-      const body=await bodyJson(req);
-      const amount=Number(body.bankroll ?? 1000);
-      if(!validBankroll(amount))fail('Invalid starting bankroll.');
-      if(rooms.size>=MAX_ROOMS)fail('Too many active tables. Please try later.',503);
-      const {room,player}=createRoom(body.name,amount);
-      return json(res,200,{code:room.code,token:player.token,state:snapshot(room,player)});
-    }
-    if(req.method==='POST'&&url.pathname==='/api/join'){
-      const body=await bodyJson(req),room=getRoom(body.code);
+    if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,version:'5.0.0',game:'Rory\'s Kinky Casino',table:'single-shared-v5'});
+    if(req.method==='POST'&&['/api/enter','/api/create','/api/join'].includes(url.pathname)){
+      const body=await bodyJson(req),room=defaultRoom;
       room.lastHumanActivityAt=Date.now();
       let player=membership(room,body.token);
-      if(!player) {
-        if(room.players.length>=MAX_PLAYERS)fail('This table is full (6 of 6 seats).',409);
+      if(!player){
+        if(room.players.length>=MAX_PLAYERS)fail('The table is full (6 of 6 seats). Ask someone to free an offline seat.',409);
         player=addPlayer(room,body.name);
+        if(room.hostId===null)room.hostId=player.id;
+        if(room.nextSpinAt===null&&!room.spin)scheduleRound(room);
       }
-      if(player.streams.size===0 && !room.players.some(p=>p.id===room.hostId&&p.streams.size>0))room.hostId=player.id;
       broadcast(room);
       return json(res,200,{code:room.code,token:player.token,state:snapshot(room,player)});
     }
@@ -290,7 +297,7 @@ const server=http.createServer(async(req,res)=>{
   } catch(e) {if(!res.headersSent)json(res,e.status||500,{error:e.status?e.message:'Server error.'});}
 });
 // Old idle tables are removed automatically. This is a casual in-memory simulator.
-const cleanup=setInterval(()=>{const now=Date.now();for(const [code,room] of rooms)if(!room.players.some(p=>p.streams.size>0)&&!room.spin&&now-room.lastHumanActivityAt>24*60*60*1000){if(room.roundTimer)clearTimeout(room.roundTimer);rooms.delete(code);}},3600000);
+const cleanup=setInterval(()=>{const now=Date.now();for(const [code,room] of rooms)if(code!==DEFAULT_CODE&&!room.players.some(p=>p.streams.size>0)&&!room.spin&&now-room.lastHumanActivityAt>24*60*60*1000){if(room.roundTimer)clearTimeout(room.roundTimer);rooms.delete(code);}},3600000);
 cleanup.unref();
-server.listen(PORT,'0.0.0.0',()=>console.log(`Rory's Roulette multiplayer listening on http://localhost:${PORT}`));
-module.exports={server,rooms,insideValid,betDefinition,wheelDistance};
+server.listen(PORT,'0.0.0.0',()=>console.log(`Rory's Kinky Casino listening on http://localhost:${PORT}`));
+module.exports={server,rooms,insideValid,betDefinition,wheelDistance,DEFAULT_CODE,snapshot};

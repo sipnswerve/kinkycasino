@@ -7,23 +7,23 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-rem Use a distinct port so an OLD Rory's Roulette on :3000 cannot be mistaken for V4.
-set "PORT=3036"
-echo Starting Rory's Roulette Reference Wheel V4...
+rem Use a distinct port so an OLD Rory's Kinky Casino on :3000 cannot be mistaken for V5.
+set "PORT=3037"
+echo Starting Rory's Kinky Casino Reference Wheel V5...
 echo.
 echo Correct roulette groups: A/B/C = columns; 1/2/3 = dozens; 0 and 00 = blank.
 echo This build opens on http://localhost:%PORT% rather than the older :3000.
 echo Keep the server window open while you play.
 echo.
-start "Rory's Roulette V4 Server" cmd /k "set PORT=3036&&node server.js"
-powershell -NoProfile -Command "$ready=$false; for($i=0;$i -lt 50;$i++){try{$r=Invoke-RestMethod -Uri 'http://127.0.0.1:3036/health' -TimeoutSec 1;if($r.version -eq '4.0.0' -and $r.wheel -eq 'correct-dozens-columns-v4-20261022'){$ready=$true;break}}catch{};Start-Sleep -Milliseconds 250};if(-not $ready){exit 1}"
+start "Rory's Kinky Casino V5 Server" cmd /k "set PORT=3037&&node server.js"
+powershell -NoProfile -Command "$ready=$false; for($i=0;$i -lt 50;$i++){try{$r=Invoke-RestMethod -Uri 'http://127.0.0.1:3037/health' -TimeoutSec 1;if($r.version -eq '5.0.0' -and $r.table -eq 'single-shared-v5'){$ready=$true;break}}catch{};Start-Sleep -Milliseconds 250};if(-not $ready){exit 1}"
 if errorlevel 1 (
   echo.
-  echo Could not verify the NEW game server. Close other Rory's Roulette server windows and retry.
-  echo If port 3036 is in use, stop that process before trying again.
+  echo Could not verify the NEW game server. Close other Rory's Kinky Casino server windows and retry.
+  echo If port 3037 is in use, stop that process before trying again.
   pause
   exit /b 1
 )
-start "" "http://localhost:%PORT%/?wheel=dozens-columns-v4"
-echo Opened Rory's Roulette Reference Wheel V4 at http://localhost:%PORT%
+start "" "http://localhost:%PORT%/?game=kinky-casino-v5"
+echo Opened Rory's Kinky Casino Reference Wheel V5 at http://localhost:%PORT%
 exit /b 0
