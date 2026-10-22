@@ -1,5 +1,5 @@
 'use strict';
-// American roulette multiplayer demo. Play credits only: no payments, prizes, or real money.
+// Rory's Roulette multiplayer demo. Play credits only: no payments, prizes, or real money.
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -27,6 +27,18 @@ define('black','Black',ALL.filter(n=>!RED.has(n)),1);
 for(let i=0;i<3;i++) define('dozen'+(i+1),`${i+1}${i===0?'st':i===1?'nd':'rd'} Dozen`,ALL.slice(i*12,(i+1)*12),2);
 for(let i=0;i<3;i++) define('col'+i,`${i===0?'Top':i===1?'Middle':'Bottom'} Column`,ALL.filter(n=>(Number(n)-1)%3===2-i),2);
 define('basket','Five-number Basket',['0','00','1','2','3'],6);
+// Signed distance between two wheel outcomes in standard American pocket order.
+// The 38-pocket wheel has opposite pockets 19 positions apart. A + offset
+// moves clockwise through WHEEL; a - offset moves counterclockwise.
+function wheelDistance(previous,latest) {
+  const before=WHEEL.indexOf(String(previous));
+  const after=WHEEL.indexOf(String(latest));
+  if(before<0||after<0)return null;
+  const steps=(after-before+WHEEL.length)%WHEEL.length;
+  const same=steps<=9||steps>=29;
+  return {from:WHEEL[before],to:WHEEL[after],side:same?'same':'opposite',
+    offset:same?(steps<=9?steps:steps-38):steps-19};
+}
 const rooms = new Map();
 
 function cleanName(input) {
@@ -48,6 +60,11 @@ function snapshot(room,player) {
     bets:player.bets, lastBets:player.lastBets,
     mineExposure:exposureFor(player.bets),otherExposure:exposureFor(otherBets),
     history:room.history.slice(-25),lastResult:room.lastResult,
+    // Keep the 26th oldest outcome only for the first distance in the 25-spin window.
+    distanceHistory:room.history.map((to,i)=>i>0
+      ?wheelDistance(room.history[i-1],to)
+      :(room.historyPrevious!==null?wheelDistance(room.historyPrevious,to):null)),
+    latestDistance:room.history.length>=2?wheelDistance(room.history.at(-2),room.history.at(-1)):null,
     lastSettlement:player.lastSettlement,
     spin:room.spin ? {...room.spin} : null,round:room.round,
     nextSpinAt:room.nextSpinAt,roundDurationMs:ROUND_MS,serverNow:Date.now(),
@@ -85,7 +102,7 @@ function scheduleRound(room) {
 function everybodyReady(room){return room.players.length>0&&room.players.every(p=>p.ready);}
 function createRoom(name,amount) {
   const now=Date.now();
-  const room={code:freshCode(),initialBankroll:amount,hostId:null,players:[],history:[],lastResult:null,spin:null,round:0,totalSpins:0,updatedAt:now,lastHumanActivityAt:now,nextBet:0,nextSpinAt:null,roundTimer:null};
+  const room={code:freshCode(),initialBankroll:amount,hostId:null,players:[],history:[],historyPrevious:null,lastResult:null,spin:null,round:0,totalSpins:0,updatedAt:now,lastHumanActivityAt:now,nextBet:0,nextSpinAt:null,roundTimer:null};
   rooms.set(room.code,room);
   const player=addPlayer(room,name);room.hostId=player.id;
   scheduleRound(room);
@@ -141,7 +158,7 @@ function spinRoom(room,reason) {
       player.bets=[];
     }
     room.round++;room.totalSpins++;room.history.push(result);
-    if(room.history.length>25)room.history.shift();
+    if(room.history.length>25)room.historyPrevious=room.history.shift();
     room.lastResult=result;room.spin=null;
     scheduleRound(room); // A fresh 90-second betting window begins after settlement.
     broadcast(room);
@@ -154,11 +171,17 @@ function executeAction(room,player,body) {
   if(action==='add') {
     if(room.spin)fail('Bets are locked during the spin.');
     if(player.bets.length>=MAX_BETS)fail('Maximum 500 chips per round.');
-    if(!CHIP_VALUES.has(body.stake))fail('Invalid chip value.');
-    if(player.bankroll<body.stake)fail('Not enough credits for that chip.');
+    // All In is atomic and server-authoritative: wager exactly the player's remaining credits.
+    // Unlike normal chips, the amount may be any positive whole-credit balance.
+    if(body.allIn!==undefined && body.allIn!==true)fail('Invalid All In selection.');
+    const stake=body.allIn===true?player.bankroll:body.stake;
+    if(body.allIn!==true && !CHIP_VALUES.has(stake))fail('Invalid chip value.');
+    if(!Number.isSafeInteger(stake)||stake<1)fail('You need available credits to bet All In.');
+    if(stake>Math.floor(Number.MAX_SAFE_INTEGER/36))fail('Wager exceeds the simulator credit limit.');
+    if(player.bankroll<stake)fail('Not enough credits for that chip.');
     const def=betDefinition(body.betType,body.numbers);
-    player.bankroll-=body.stake;
-    player.bets.push({id:++room.nextBet,...def,stake:body.stake});
+    player.bankroll-=stake;
+    player.bets.push({id:++room.nextBet,...def,stake});
   } else if(action==='remove') {
     if(room.spin)fail('Bets are locked during the spin.');
     const i=player.bets.findIndex(b=>b.id===body.betId);
@@ -193,7 +216,7 @@ function executeAction(room,player,body) {
     if(room.spin)fail('Finish the spin before resetting.');
     const amount=Number(body.amount);
     if(!validBankroll(amount))fail('Starting credits must be between 1 and 100,000,000.');
-    room.initialBankroll=amount;room.history=[];room.lastResult=null;room.totalSpins=0;room.round=0;
+    room.initialBankroll=amount;room.history=[];room.historyPrevious=null;room.lastResult=null;room.totalSpins=0;room.round=0;
     for(const p of room.players) {p.bankroll=amount;p.pl=0;p.bets=[];p.lastBets=[];p.lastSettlement=null;}
     scheduleRound(room);
   } else if(action==='kick') {
@@ -219,7 +242,7 @@ function getUser(room,token) {const player=membership(room,token);if(!player)fai
 const server=http.createServer(async(req,res)=>{
   try {
     const url=new URL(req.url,'http://localhost');
-    if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true});
+    if(req.method==='GET'&&url.pathname==='/health')return json(res,200,{ok:true,version:'4.0.0',wheel:'correct-dozens-columns-v4-20261022'});
     if(req.method==='POST'&&url.pathname==='/api/create'){
       const body=await bodyJson(req);
       const amount=Number(body.bankroll ?? 1000);
@@ -260,7 +283,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.method==='GET'&&(url.pathname==='/'||url.pathname==='/index.html'||url.pathname==='/client.js'||url.pathname==='/favicon.ico')){
       if(url.pathname==='/favicon.ico'){res.writeHead(204);return res.end();}
       const file=url.pathname==='/client.js'?'client.js':'index.html';
-      res.writeHead(200,{'Content-Type':file.endsWith('.js')?'application/javascript; charset=utf-8':'text/html; charset=utf-8','Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'});
+      res.writeHead(200,{'Content-Type':file.endsWith('.js')?'application/javascript; charset=utf-8':'text/html; charset=utf-8','Cache-Control':'no-store, max-age=0, must-revalidate','X-Content-Type-Options':'nosniff'});
       return fs.createReadStream(path.join(PUBLIC_DIR,file)).pipe(res);
     }
     return json(res,404,{error:'Page not found.'});
@@ -269,5 +292,5 @@ const server=http.createServer(async(req,res)=>{
 // Old idle tables are removed automatically. This is a casual in-memory simulator.
 const cleanup=setInterval(()=>{const now=Date.now();for(const [code,room] of rooms)if(!room.players.some(p=>p.streams.size>0)&&!room.spin&&now-room.lastHumanActivityAt>24*60*60*1000){if(room.roundTimer)clearTimeout(room.roundTimer);rooms.delete(code);}},3600000);
 cleanup.unref();
-server.listen(PORT,'0.0.0.0',()=>console.log(`Roulette multiplayer listening on http://localhost:${PORT}`));
-module.exports={server,rooms,insideValid,betDefinition};
+server.listen(PORT,'0.0.0.0',()=>console.log(`Rory's Roulette multiplayer listening on http://localhost:${PORT}`));
+module.exports={server,rooms,insideValid,betDefinition,wheelDistance};

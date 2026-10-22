@@ -1,9 +1,14 @@
 {
-  "name": "american-roulette-six-player",
-  "version": "1.0.0",
+  "name": "rorys-roulette-multiplayer",
+  "version": "4.0.0",
   "private": true,
-  "description": "Six-player shared-wheel American roulette simulator (play credits only)",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node server.js", "test": "node --test test/*.test.js" },
+  "description": "Rory's Roulette — six-player live American roulette with a reference-style upright-label roulette wheel and synchronized 25-result S/O wheel-distance history (play credits only)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
   "license": "UNLICENSED"
 }
