@@ -16,7 +16,7 @@ const el=id=>document.getElementById(id);
 const money=n=>(n<0?'−':'')+'$'+Math.abs(n).toLocaleString('en-US',{maximumFractionDigits:0});
 const colorOf=n=>n==='0'||n==='00'?'green':RED.has(n)?'red':'black';
 const defaultFill={red:'#ed171c',black:'#151515',green:'#007c34'};
-let state=null, session=null, chip=5,allIn=false,allInPending=false,mode='straight',selection=[],spinning=false,spinAngle=0,shownSpinId=null, toastTimeout=null,events=null,serverOffset=0;
+let state=null, session=null, chip=5,allIn=false,allInPending=false,spinning=false,spinAngle=0,shownSpinId=null, toastTimeout=null,events=null,serverOffset=0;
 const bettingLocked=()=>spinning||!!state?.you?.ready;
 const $grid=el('numberGrid');
 for(let row=2;row>=0;row--)for(let col=0;col<12;col++){
@@ -104,35 +104,89 @@ async function addBet(data,stake=chip){
  const accepted=await action('add',{betType:data.type,numbers:data.numbers,...(isAllIn?{allIn:true}:{stake})});
  if(isAllIn){allInPending=false;if(accepted)allIn=false;updateAll();}
 }
-function onNumber(num){if(bettingLocked())return;if(mode==='straight'){addBet({type:'straight',numbers:[num]});return;}
- if(num==='0'||num==='00'){toast('0 / 00 are available as straight or basket bets.');return;}
- if(selection.includes(num))selection=selection.filter(n=>n!==num);else {if(selection.length>=MODE[mode].size)selection=[];selection.push(num);}
- updateAll();
+// The click position itself selects the bet type; no separate selector.
+function onNumber(num){if(!bettingLocked())addBet({type:'straight',numbers:[String(num)]});}
+function gridHitTarget(x,y){
+  const col=Math.max(0,Math.min(11,Math.floor(x))),row=Math.max(0,Math.min(2,Math.floor(y)));
+  const nearVertical=Math.round(x),nearHorizontal=Math.round(y);
+  const atCol=nearVertical>=1&&nearVertical<=11&&Math.abs(x-nearVertical)<.19;
+  const atRow=nearHorizontal>=1&&nearHorizontal<=2&&Math.abs(y-nearHorizontal)<.19;
+  const outerEdge=y<.16||y>2.84;
+  const n=(c,r)=>String(c*3+3-r);
+  if(outerEdge){
+    if(atCol){const a=(nearVertical-1)*3+1;return {type:'sixline',numbers:Array.from({length:6},(_,i)=>String(a+i))};}
+    return {type:'street',numbers:[1,2,3].map(i=>String(col*3+i))};
+  }
+  if(atCol&&atRow){const a=nearVertical-1,r=nearHorizontal-1;return {type:'corner',numbers:[n(a,r),n(a,r+1),n(a+1,r),n(a+1,r+1)]};}
+  if(atCol){return {type:'split',numbers:[n(nearVertical-1,row),n(nearVertical,row)]};}
+  if(atRow){return {type:'split',numbers:[n(col,nearHorizontal-1),n(col,nearHorizontal)]};}
+  return {type:'straight',numbers:[n(col,row)]};
 }
-function setMode(m){if(bettingLocked())return;mode=m;selection=[];for(const b of document.querySelectorAll('.mode'))b.classList.toggle('active',b.dataset.mode===mode);updateAll();}
-function putSelection(){if(bettingLocked()||mode==='straight')return;const nums=selection.map(Number).sort((a,b)=>a-b).map(String);
- if(!insideValid(mode,nums)){toast('Select a valid adjacent '+MODE[mode].label.toLowerCase()+'.');return;}
- selection=[];updateAll();addBet({type:mode,numbers:nums});
+function pointerBet(e){
+ if(!state||bettingLocked()||allInPending)return;
+ const rect=$grid.getBoundingClientRect();
+ const x=(e.clientX-rect.left)/rect.width*12,y=(e.clientY-rect.top)/rect.height*3;
+ if(x<0||x>=12||y<0||y>=3)return;
+ const bet=gridHitTarget(x,y);
+ el('builderMsg').textContent=bet.type.toUpperCase()+' · '+bet.numbers.join(' / ')+' · '+MODE[bet.type].payout+':1';
+ addBet(bet);
 }
-function updateBuilder(){const box=el('builderMsg'),place=el('placeSelection'),cancel=el('cancelSelection');if(mode==='straight'){box.innerHTML='Mode: <strong>Straight</strong> — tap a number to bet on it.';place.hidden=true;cancel.hidden=true;return;}
- const required=MODE[mode].size,count=selection.length,valid=count===required&&insideValid(mode,selection);
- box.innerHTML='<strong>'+MODE[mode].label+'</strong> — '+(count?selection.map(Number).sort((a,b)=>a-b).join(', ')+' selected. ':'Select '+required+' adjacent numbers. ')+`(${count} / ${required})`+(count===required&&!valid?' <span style="color:#ffaaa2">Not a valid group.</span>':'');
- place.hidden=false;cancel.hidden=!count;place.disabled=!valid||bettingLocked();
+function positionForBet(b){
+ const pts=b.numbers.filter(n=>n!=='0'&&n!=='00').map(n=>{const v=Number(n)-1;return {x:(Math.floor(v/3)+.5)/12,y:(2-v%3+.5)/3};});
+ if(!pts.length)return null;
+ let x=pts.reduce((a,v)=>a+v.x,0)/pts.length,y=pts.reduce((a,v)=>a+v.y,0)/pts.length;
+ if(b.type==='street'||b.type==='sixline')y=.045;
+ return {x,y};
+}
+function updateBoardBets(){
+ if(!state)return;
+ const overlay=el('boardMarkers');overlay.replaceChildren();
+ const all=new Map();
+ for(const b of state.bets){
+  const key=state.you.seat+'|'+b.type+'|'+b.numbers.join(',');
+  let r=all.get(key);if(!r){r={seat:state.you.seat,name:state.you.name,type:b.type,numbers:b.numbers,stake:0,count:0,self:true};all.set(key,r);}
+  r.stake+=b.stake;r.count++;
+ }
+ for(const r of state.otherBoardBets||[]){const key=r.seat+'|'+r.type+'|'+r.numbers.join(',');all.set(key,{...r,self:false});}
+ const posCounts=new Map();
+ for(const b of all.values()){
+  if(out[b.type]){
+   const btn=document.querySelector('[data-outside="'+b.type+'"]');if(!btn)continue;
+   // Appended after clearing the prior display below.
+   continue;
+  }
+  if(b.type==='basket')continue;
+  const pt=positionForBet(b);if(!pt)continue;
+  const k=pt.x.toFixed(4)+'|'+pt.y.toFixed(4);const index=posCounts.get(k)||0;posCounts.set(k,index+1);
+  const badge=document.createElement('span');badge.className='board-marker'+(b.self?' self':'')+(b.count>1?' multiple':'');
+  badge.textContent=String(b.seat)+(b.count>1?'×'+b.count:'');
+  badge.title=(b.self?'Your':b.name+'’s')+' '+b.type+' '+b.numbers.join(', ')+' · '+money(b.stake);
+  badge.style.left=(pt.x*100)+'%';badge.style.top=(pt.y*100)+'%';
+  badge.style.transform='translate(calc(-50% + '+((index%3)*12-12)+'px),calc(-50% + '+(Math.floor(index/3)*11)+'px))';
+  overlay.append(badge);
+ }
+ for(const btn of document.querySelectorAll('[data-outside]')){
+   btn.querySelector('.outside-marker-group')?.remove();
+   const matching=[...all.values()].filter(x=>x.type===btn.dataset.outside);
+   if(!matching.length)continue;
+   const holder=document.createElement('span');holder.className='outside-marker-group';
+   for(const b of matching){const badge=document.createElement('span');badge.className='outside-seat-marker'+(b.self?' self':'');badge.textContent=String(b.seat);badge.title=(b.self?'Your':b.name+'’s')+' bet '+money(b.stake);holder.append(badge);}
+   btn.append(holder);
+ }
 }
 function updateWheel(){if(!state)return;
- const mine=state.mineExposure,other=state.otherExposure,covered=WHEEL.filter(n=>(mine[n]||0)+(other[n]||0)>0);
+ const mine=state.mineExposure,covered=WHEEL.filter(n=>(mine[n]||0)>0);
  const peak=Math.max(...WHEEL.map(n=>mine[n]||0),1);
- for(const n of WHEEL){const path=wheelPaths.get(n),my=mine[n]||0,their=other[n]||0;
- path.classList.toggle('covered',!!my||!!their);
- path.classList.toggle('other-hit',!my&&!!their);
- path.classList.toggle('last-hit',state.lastResult===n&&!my&&!their);
- if(my){const amt=my/peak;path.setAttribute('fill',amt>.67?'#ffdf83':amt>.27?'#edbc66':'#d9a95e');path.setAttribute('stroke',their?'#65daff':'#ffe6a1');path.setAttribute('stroke-width',their?'3':'1.7');}
- else if(their){path.setAttribute('fill','#55bfe3');path.setAttribute('stroke','#caf4ff');path.setAttribute('stroke-width','1.7');}
- else {path.setAttribute('fill',state.lastResult===n?'#6adeb5':defaultFill[colorOf(n)]);path.setAttribute('stroke','#16251c');path.setAttribute('stroke-width','1.3');}
+ for(const n of WHEEL){const path=wheelPaths.get(n),my=mine[n]||0;
+  path.classList.toggle('covered',!!my);path.classList.remove('other-hit');
+  path.classList.toggle('last-hit',state.lastResult===n&&!my);
+  if(my){const amt=my/peak;path.setAttribute('fill',amt>.67?'#ffdf83':amt>.27?'#edbc66':'#d9a95e');path.setAttribute('stroke','#ffe6a1');path.setAttribute('stroke-width','1.7');}
+  else{path.setAttribute('fill',state.lastResult===n?'#6adeb5':defaultFill[colorOf(n)]);path.setAttribute('stroke','#16251c');path.setAttribute('stroke-width','1.3');}
  }
  el('coveredCount').textContent=covered.length+' / 38';el('coveredPct').textContent=(covered.length/38*100).toFixed(1)+'%';el('activeBets').textContent=state.bets.length;el('hubNumber').textContent=covered.length+' / 38';
- document.querySelectorAll('button[data-num]').forEach(b=>{const n=b.dataset.num;b.classList.toggle('covered',!!mine[n]);b.classList.toggle('other-covered',!!other[n]&&!mine[n]);b.classList.toggle('selected',selection.includes(n));let chipcount=b.querySelector('.chip-count');const count=state.bets.filter(x=>x.numbers.length===1&&x.numbers[0]===n).length;if(count){if(!chipcount){chipcount=document.createElement('span');chipcount.className='chip-count';b.append(chipcount);}chipcount.textContent=count;}else if(chipcount)chipcount.remove();});
+ document.querySelectorAll('button[data-num]').forEach(b=>{const n=b.dataset.num;b.classList.toggle('covered',!!mine[n]);b.classList.toggle('other-covered',!!state.otherExposure[n]&&!mine[n]);});
  document.querySelectorAll('[data-outside]').forEach(b=>b.classList.toggle('active-bet',state.bets.some(x=>x.type===b.dataset.outside)));
+ updateBoardBets();
 }
 function updateTicket(){if(!state)return;const lines=el('ticketLines');lines.replaceChildren();if(!state.bets.length){const msg=document.createElement('div');msg.className='ticket-empty';msg.textContent='No bets yet. Tap a number or outside bet to begin.';lines.append(msg);}else{
  for(const bet of [...state.bets].reverse()){
@@ -250,11 +304,11 @@ function updateAll(){if(!state)return;
  el('allInButton').setAttribute('aria-pressed',String(allIn));
  el('allInButton').disabled=bettingLocked()||allInPending||state.you.bankroll<=0;
  el('chipbar').classList.toggle('all-in-selected',allIn);
- for(const b of document.querySelectorAll('.bet-cell,.outside-cell,.basket-btn,.mode,.chip'))b.disabled=bettingLocked()||allInPending;
- updateWheel();updateBuilder();updateTicket();drawResult();seats();updateCountdown();
+ for(const b of document.querySelectorAll('.bet-cell,.outside-cell,.basket-btn,.chip'))b.disabled=bettingLocked()||allInPending;
+ updateWheel();updateTicket();drawResult();seats();updateCountdown();
  if(state.spin){animateSpin(state.spin);el('resultTitle').textContent='Wheel spinning…';el('resultDesc').textContent='All bets are locked until the result.';}
 }
-function acceptState(next){if(!next||!session||next.code!==session.code)return;if(state&&next.round!==state.round){allIn=false;selection=[];}serverOffset=next.serverNow-Date.now();state=next;updateAll();}
+function acceptState(next){if(!next||!session||next.code!==session.code)return;if(state&&next.round!==state.round){allIn=false;}serverOffset=next.serverNow-Date.now();state=next;updateAll();}
 function connectEvents(){if(events)events.close();events=new EventSource('/events?code='+encodeURIComponent(session.code)+'&token='+encodeURIComponent(session.token));
  events.addEventListener('state',e=>{try {acceptState(JSON.parse(e.data));}catch(err){console.warn('Invalid table update',err);}});
  events.onopen=()=>{el('connectionText').textContent='Live · Shared table';el('connectionDot').classList.remove('offline');};
@@ -263,31 +317,33 @@ function connectEvents(){if(events)events.close();events=new EventSource('/event
 function storedName(){try{return localStorage.getItem('roulette_name')||'';}catch{return '';}}
 function savedToken(code){try{return localStorage.getItem('roulette_seat_'+code)||'';}catch{return '';}}
 function saveIdentity(code,token,name){try{localStorage.setItem('roulette_seat_'+code,token);localStorage.setItem('roulette_name',name);}catch{}}
-function showLobby(err=''){el('lobby').hidden=false;el('app').hidden=true;if(err)el('lobbyError').textContent=err;else if(location.protocol==='file:')el('lobbyError').textContent='Multiplayer requires the game server. Use START_LOCAL_WINDOWS.bat instead of double-clicking this HTML file.';el('inviteCode').value=(new URLSearchParams(location.search).get('room')||'').toUpperCase();el('playerName').value=storedName();}
+function showLobby(err=''){
+ el('lobby').hidden=false;el('app').hidden=true;
+ el('lobbyError').textContent=err|| (location.protocol==='file:'?'Run START_LOCAL_WINDOWS.bat or deploy the website; HTML alone cannot run multiplayer.':'');
+ el('playerName').value=storedName();
+}
 function enter(reply,name){session={code:reply.code,token:reply.token};saveIdentity(reply.code,reply.token,name);
  el('lobby').hidden=true;el('app').hidden=false;el('lobbyError').textContent='';
- const url=new URL(location.href);url.searchParams.set('room',reply.code);history.replaceState(null,'',url.pathname+'?room='+encodeURIComponent(reply.code));
+ try{history.replaceState(null,'',location.pathname);}catch{}
  acceptState(reply.state);connectEvents();
 }
-async function joinRoom(code,name,token=''){return api('/api/join',{code,name,token});}
+async function joinRoom(name,token=''){return api('/api/enter',{name,token});}
 let joining=false;
-async function withLobbyTask(job){if(joining)return;joining=true;el('createTable').disabled=true;el('joinTable').disabled=true;el('lobbyError').textContent='';try{await job();}catch(e){el('lobbyError').textContent=e.message||'Could not join table.';}finally{joining=false;el('createTable').disabled=false;el('joinTable').disabled=false;}}
-el('createTable').onclick=()=>withLobbyTask(async()=>{const name=el('playerName').value.trim()||'Player',bankroll=Number(el('createBankroll').value);
- const reply=await api('/api/create',{name,bankroll});enter(reply,name);});
-el('joinTable').onclick=()=>withLobbyTask(async()=>{const code=el('inviteCode').value.toUpperCase().trim(),name=el('playerName').value.trim()||'Player';
- const reply=await joinRoom(code,name,savedToken(code));enter(reply,name);});
-el('inviteCode').addEventListener('input',e=>{e.target.value=e.target.value.toUpperCase().replace(/[^A-Z2-9]/g,'').slice(0,7);});
-el('inviteCode').addEventListener('keydown',e=>{if(e.key==='Enter')el('joinTable').click();});
-el('playerName').addEventListener('keydown',e=>{if(e.key==='Enter')el('inviteCode').value?el('joinTable').click():el('createTable').click();});
-el('copyLink').onclick=async()=>{if(!session)return;if(['localhost','127.0.0.1'].includes(location.hostname)){toast('Localhost invites only work on your own PC. Deploy online to share with friends.');return;}const link=new URL(location.href);link.searchParams.set('room',session.code);const value=link.toString();
- try{await navigator.clipboard.writeText(value);toast('Invite link copied! Send it to up to 5 friends.');}catch{prompt('Copy this invite link:',value);}
+async function withLobbyTask(job){if(joining)return;joining=true;el('enterTable').disabled=true;el('lobbyError').textContent='';try{await job();}catch(e){el('lobbyError').textContent=e.message||'Could not join the table.';}finally{joining=false;el('enterTable').disabled=false;}}
+el('enterTable').onclick=()=>withLobbyTask(async()=>{
+ const name=el('playerName').value.trim();if(!name)throw new Error('Enter your name to take a seat.');
+ const reply=await joinRoom(name,savedToken('CASINO7'));enter(reply,name);
+});
+el('playerName').addEventListener('keydown',e=>{if(e.key==='Enter')el('enterTable').click();});
+el('copyLink').onclick=async()=>{const link=location.origin+location.pathname;
+ try{await navigator.clipboard.writeText(link);toast('Game link copied! Anyone with the link can join this shared table.');}catch{prompt('Copy the game link:',link);}
 };
-for(const btn of document.querySelectorAll('button[data-num]'))btn.addEventListener('click',()=>onNumber(btn.dataset.num));
+// The number grid's hit location selects a straight, split, corner, street or six-line.
+$grid.addEventListener('click',pointerBet);
+for(const btn of document.querySelectorAll('.zero-grid button[data-num]'))btn.addEventListener('click',()=>onNumber(btn.dataset.num));
 for(const btn of document.querySelectorAll('[data-outside]'))btn.addEventListener('click',()=>addBet(out[btn.dataset.outside]));
 for(const btn of document.querySelectorAll('.chip'))btn.addEventListener('click',()=>{if(bettingLocked()||allInPending)return;allIn=false;chip=Number(btn.dataset.value);document.querySelectorAll('.chip').forEach(b=>b.classList.toggle('active',b===btn));updateAll();});
 el('allInButton').onclick=()=>{if(!state||bettingLocked()||allInPending)return;if(!allIn&&state.you.bankroll<1)return toast('No available credits to bet All In.');allIn=!allIn;document.querySelectorAll('.chip').forEach(b=>b.classList.toggle('active',!allIn&&Number(b.dataset.value)===chip));updateAll();};
-for(const btn of document.querySelectorAll('.mode'))btn.addEventListener('click',()=>setMode(btn.dataset.mode));
-el('cancelSelection').onclick=()=>{selection=[];updateAll();};el('placeSelection').onclick=putSelection;
 el('undoButton').onclick=()=>action('undo');el('clearButton').onclick=()=>action('clear');
 const toggleReady=()=>{if(state&&!spinning)action('ready',{ready:!state.you.ready});};
 el('spinButton').onclick=toggleReady;el('readyButton').onclick=toggleReady;
@@ -297,13 +353,14 @@ document.addEventListener('visibilitychange',()=>{if(!document.hidden)updateCoun
 el('resetSession').onclick=()=>{if(spinning)return;const amount=Number(el('startBankroll').value);if(!Number.isSafeInteger(amount)||amount<1||amount>100000000)return toast('Enter 1 to 100,000,000 credits.');
  if(confirm('Reset the entire shared table, all six players’ credits, bets and history?'))action('reset',{amount});};
 document.addEventListener('keydown',e=>{if(!state||e.target.matches('input,textarea')||spinning)return;
- if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();action('undo');}else if(e.key==='Escape'){selection=[];updateAll();}
- else if(/^[1-5]$/.test(e.key)&&!e.ctrlKey){const options=[1,5,10,25,100],btn=document.querySelector(`.chip[data-value="${options[Number(e.key)-1]}"]`);if(btn)btn.click();}
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();action('undo');}else if(e.key==='Escape'){allIn=false;updateAll();}
+ else if(/^[1-6]$/.test(e.key)&&!e.ctrlKey){const options=[1,5,10,25,100,500],btn=document.querySelector(`.chip[data-value="${options[Number(e.key)-1]}"]`);if(btn)btn.click();}
  else if((e.key==='s'||e.key==='S')&&!e.ctrlKey&&!e.metaKey){toggleReady();}
 });
-// The link contains the room code, never the private seat token.
-const initialCode=(new URLSearchParams(location.search).get('room')||'').toUpperCase();showLobby();
-if(initialCode && /^[A-Z2-9]{7}$/.test(initialCode)&&savedToken(initialCode)){
- withLobbyTask(async()=>{const name=storedName()||'Player';const reply=await joinRoom(initialCode,name,savedToken(initialCode));enter(reply,name);});
-}
+// Join the sole default table. The token is a private, device-stored seat identifier, not a password.
+showLobby();
+if(savedToken('CASINO7'))withLobbyTask(async()=>{
+ try{const name=storedName()||'Player';const reply=await joinRoom(name,savedToken('CASINO7'));enter(reply,name);}
+ catch(err){if(/expired|full|not found/i.test(err.message)){try{localStorage.removeItem('roulette_seat_CASINO7');}catch{}}throw err;}
+});
 })();
